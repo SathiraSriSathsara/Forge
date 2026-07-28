@@ -12,11 +12,14 @@ copies. The service is built with Express, Sequelize, MySQL, and `simple-git`.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Conventions](#conventions)
+- [Authentication](#authentication)
 - [Endpoint summary](#endpoint-summary)
 - [Health check](#health-check)
 - [Users](#users)
 - [Git credentials](#git-credentials)
 - [Repositories](#repositories)
+- [Gitea webhooks](GITEA_WEBHOOK_SETUP.md)
+- [Docker builds](DOCKER_BUILD_SETUP.md)
 - [Errors](#errors)
 - [Data models](#data-models)
 - [Security and operational notes](#security-and-operational-notes)
@@ -49,6 +52,14 @@ DB_PASSWORD=change-me
 
 # Exactly 32 random bytes represented by 64 hexadecimal characters.
 TOKEN_ENCRYPTION_KEY=replace-with-a-64-character-hexadecimal-key
+
+# At least 32 characters. Keep this secret and stable.
+JWT_SECRET=replace-with-a-long-random-jwt-signing-secret
+JWT_EXPIRES_IN=1h
+
+# Complete Docker builder endpoint, including /build.
+DOCKER_BUILD_API_URL=http://localhost:8000/build
+DOCKER_BUILD_API_TIMEOUT_MS=120000
 ```
 
 Generate an encryption key with Node.js:
@@ -83,6 +94,10 @@ API routes are under `/api`.
 | `DB_USER` | Yes | — | MySQL username. |
 | `DB_PASSWORD` | Yes | — | MySQL password. |
 | `TOKEN_ENCRYPTION_KEY` | Yes for credential operations | — | A 64-character hexadecimal AES-256 key. |
+| `JWT_SECRET` | Yes | — | Secret used to sign access tokens; must contain at least 32 characters. |
+| `JWT_EXPIRES_IN` | No | `1h` | Access-token lifetime accepted by `jsonwebtoken`, such as `15m`, `1h`, or `7d`. |
+| `DOCKER_BUILD_API_URL` | Yes for repository synchronization | — | Complete Docker build endpoint, including `/build`. |
+| `DOCKER_BUILD_API_TIMEOUT_MS` | No | `120000` | Docker builder request timeout in milliseconds; minimum accepted value is 1000. |
 
 Keep `TOKEN_ENCRYPTION_KEY` stable. Credentials encrypted with one key cannot
 be decrypted after the key is changed or lost.
@@ -108,9 +123,15 @@ origin.
 
 ### Authentication
 
-The API itself currently has no authentication or authorization middleware.
-The Git credentials stored through this API are used only when cloning or
-updating repositories.
+Protected endpoints require an access token:
+
+```http
+Authorization: Bearer <access-token>
+```
+
+See [Authentication](#authentication) for login details. Gitea webhooks do not
+use JWT authentication; their raw request body is authenticated with the
+configured HMAC signature.
 
 ### Dates and IDs
 
@@ -124,15 +145,83 @@ updating repositories.
 | Method | Path | Description | Success |
 | --- | --- | --- | --- |
 | `GET` | `/api` | Check API availability. | `200` |
+| `POST` | `/api/auth/login` | Exchange email/password for an access token. | `200` |
 | `POST` | `/api/users` | Create a user. | `201` |
-| `GET` | `/api/users` | List users. | `200` |
-| `GET` | `/api/users/:id` | Get one user. | `200` |
-| `PUT` | `/api/users/:id` | Update a user (see current limitation). | `200` |
-| `DELETE` | `/api/users/:id` | Delete a user. | `200` |
-| `POST` | `/api/tockens` | Store an encrypted Git credential. | `201` |
-| `GET` | `/api/tockens` | List credential metadata. | `200` |
-| `DELETE` | `/api/tockens/:id` | Delete a credential. | `200` |
-| `POST` | `/api/repos/clone` | Clone or synchronize a repository. | `200` or `201` |
+| `GET` | `/api/users` | List users (protected). | `200` |
+| `GET` | `/api/users/:id` | Get one user (protected). | `200` |
+| `PUT` | `/api/users/:id` | Update a user (protected; see current limitation). | `200` |
+| `DELETE` | `/api/users/:id` | Delete a user (protected). | `200` |
+| `POST` | `/api/tockens` | Store an encrypted Git credential (protected). | `201` |
+| `GET` | `/api/tockens` | List credential metadata (protected). | `200` |
+| `DELETE` | `/api/tockens/:id` | Delete a credential (protected). | `200` |
+| `POST` | `/api/repos/clone` | Clone or synchronize a repository (protected). | `200` or `201` |
+| `POST` | `/api/webhooks/gitea/:repoId` | Process a signed Gitea push webhook. | `200` or `202` |
+
+## Authentication
+
+### Public endpoints
+
+- `GET /api`
+- `POST /api/auth/login`
+- `POST /api/users`
+- `POST /api/webhooks/gitea/:repoId` (authenticated by Gitea HMAC signature)
+
+All other registered endpoints require a bearer access token. Authentication
+establishes identity only; the API does not currently implement roles or
+per-record ownership, so any authenticated user can access protected
+management endpoints.
+
+### Log in
+
+`POST /api/auth/login`
+
+```json
+{
+  "email": "ada@example.com",
+  "password": "a-strong-password"
+}
+```
+
+Email matching is case-insensitive because registration and login normalize it
+to lowercase. Invalid credentials return the same `401 Invalid email or
+password` response.
+
+**Response — `200 OK`**
+
+```json
+{
+  "success": true,
+  "message": "Login successful",
+  "data": {
+    "accessToken": "<signed-jwt>",
+    "tokenType": "Bearer",
+    "expiresIn": "1h",
+    "user": {
+      "id": 1,
+      "firstName": "Ada",
+      "lastName": "Lovelace",
+      "email": "ada@example.com",
+      "username": "ada"
+    }
+  }
+}
+```
+
+The JWT uses HS256, stores the user ID in `sub`, and includes `email` and
+`username`. The authentication middleware also confirms that the referenced
+user still exists.
+
+### Use an access token
+
+```bash
+curl http://localhost:3000/api/tockens \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+Missing bearer credentials return `401 Authentication required`. Malformed,
+expired, or incorrectly signed tokens return `401 Invalid or expired access
+token`. A token for a deleted user returns `401 Access token user no longer
+exists`.
 
 ## Health check
 
@@ -162,14 +251,9 @@ This endpoint does not perform a separate database or Git health check.
 | `lastName` | string | Required by the database, maximum length 100. |
 | `username` | string | Required, maximum length 100. Not unique. |
 | `email` | string | Required, valid email, maximum length 150, unique. |
-| `password` | string | Bcrypt hash stored in the database. |
+| `password` | string | Accepted on registration and stored as a bcrypt hash; never returned. |
 | `createdAt` | string | Creation timestamp. |
 | `updatedAt` | string | Last update timestamp. |
-
-> [!WARNING]
-> Current user create, list, get, and update responses serialize the complete
-> Sequelize user, including the bcrypt password hash. Do not expose these
-> endpoints to untrusted clients until password fields are excluded.
 
 ### Create a user
 
@@ -211,7 +295,6 @@ but does not explicitly check `lastName`. Omitting `lastName` still produces a
     "lastName": "Lovelace",
     "email": "ada@example.com",
     "username": "ada",
-    "password": "$2b$10$...",
     "updatedAt": "2026-07-29T10:00:00.000Z",
     "createdAt": "2026-07-29T10:00:00.000Z"
   }
@@ -240,7 +323,6 @@ Returns all users ordered by `id` descending. There is no pagination.
       "lastName": "Lovelace",
       "username": "ada",
       "email": "ada@example.com",
-      "password": "$2b$10$...",
       "createdAt": "2026-07-29T10:00:00.000Z",
       "updatedAt": "2026-07-29T10:00:00.000Z"
     }
@@ -267,7 +349,6 @@ Returns all users ordered by `id` descending. There is no pagination.
     "lastName": "Lovelace",
     "username": "ada",
     "email": "ada@example.com",
-    "password": "$2b$10$...",
     "createdAt": "2026-07-29T10:00:00.000Z",
     "updatedAt": "2026-07-29T10:00:00.000Z"
   }
@@ -309,7 +390,6 @@ The current controller accepts `name`, `email`, and `age`:
     "lastName": "Lovelace",
     "username": "ada",
     "email": "ada.byron@example.com",
-    "password": "$2b$10$...",
     "createdAt": "2026-07-29T10:00:00.000Z",
     "updatedAt": "2026-07-29T11:00:00.000Z"
   }
@@ -436,7 +516,8 @@ Returns `404 Tocken not found` when no matching credential exists.
 
 Clones a repository into the server's `<project-root>/repos` directory. If the
 local directory already contains the requested repository, it is synchronized
-to the remote. The resulting repository metadata is saved to MySQL.
+to the remote. The resulting repository metadata and generated Docker image
+name are saved to MySQL, then the configured Docker build API is called.
 
 **Body**
 
@@ -445,7 +526,8 @@ to the remote. The resulting repository metadata is saved to MySQL.
   "name": "example-project",
   "url": "https://github.com/example/example-project.git",
   "tockenID": 1,
-  "branch": "main"
+  "branch": "main",
+  "webhookSecret": "replace-with-a-secret-containing-at-least-32-characters"
 }
 ```
 
@@ -455,6 +537,7 @@ to the remote. The resulting repository metadata is saved to MySQL.
 | `url` | Yes | HTTPS Git URL. A missing `.git` suffix is added automatically. Embedded URL credentials are removed. |
 | `tockenID` | Yes | ID of a stored Git credential. |
 | `branch` | No | Branch to clone/synchronize. If omitted, the remote default branch is used, falling back to `main` if it cannot be detected. |
+| `webhookSecret` | Yes | Secret used to verify Gitea webhooks; must contain 32–255 characters. |
 
 For a credential whose platform is `github`, the URL host must be exactly
 `github.com`. Gitea credentials accept any HTTPS host.
@@ -495,7 +578,15 @@ Returned when a new database record is created:
     "savedLocation": "C:\\path\\to\\api\\repos\\example-project",
     "lastCommit": "a1b2c3d4e5f6...",
     "lastUpdated": "2026-07-29T10:00:00.000Z",
-    "action": "cloned"
+    "action": "cloned",
+    "webhookEndpoint": "/api/webhooks/gitea/1",
+    "imageName": "forge-example-project",
+    "dockerBuild": {
+      "success": true,
+      "message": "Docker image built successfully",
+      "imageName": "forge-example-project",
+      "zipFile": "/output/forge-example-project.zip"
+    }
   }
 }
 ```
@@ -515,6 +606,7 @@ Common errors:
 | `404` | Credential does not exist, or the requested remote branch does not exist during an update. |
 | `409` | A different repository database record already uses the computed local folder. |
 | `500` | Credential decryption fails, local repository has no `origin`, Git fails, or a filesystem/database operation fails. |
+| `502` | Docker build service is unavailable, times out, or rejects/fails the build. |
 
 Operational details:
 
@@ -525,6 +617,9 @@ Operational details:
   local Git configuration is removed in a `finally` block.
 - Clone failures and other partial failures are not transactionally rolled
   back across the filesystem and database.
+- Git and database synchronization complete before the Docker build call. A
+  `502` may therefore represent a synchronized repository whose image build
+  failed and can be retried.
 
 ## Errors
 
@@ -589,17 +684,17 @@ ivHex:authenticationTagHex:ciphertextHex
 
 ### `Repo`
 
-`id`, `repo_name`, `saved_location`, `repo_url`, `branch`, `last_commit`,
-`last_updated`, `created_at`, `updated_at`
+`id`, `repo_name`, `saved_location`, `repo_url`, `branch`, `tocken_id`,
+`webhook_secret`, `image_name`, `last_commit`, `last_updated`, `created_at`,
+`updated_at`
 
-No model associations or foreign-key constraints are currently defined.
-Deleting a credential does not delete repository records that previously used
-it.
+`Repo.tocken_id` references `Tocken.id`. Credential updates cascade, while
+credential deletion is restricted when repositories still reference it.
 
 ## Security and operational notes
 
-- Add authentication and role-based authorization before deployment. Every
-  endpoint is currently public.
+- Add role-based authorization or record ownership before exposing management
+  endpoints to users with different trust levels.
 - Exclude password hashes from all user responses.
 - Treat `TOKEN_ENCRYPTION_KEY` as a production secret and store it outside
   source control.
@@ -620,13 +715,20 @@ it.
 # Health
 curl http://localhost:3000/api
 
+# Log in
+curl -X POST http://localhost:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"a-strong-password"}'
+
 # Create a credential
 curl -X POST http://localhost:3000/api/tockens \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -d '{"name":"GitHub automation","platform":"github","username":"octocat","tocken":"YOUR_TOKEN"}'
 
 # Clone or update a repository
 curl -X POST http://localhost:3000/api/repos/clone \
   -H "Content-Type: application/json" \
-  -d '{"name":"example-project","url":"https://github.com/example/example-project.git","tockenID":1,"branch":"main"}'
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -d '{"name":"example-project","url":"https://github.com/example/example-project.git","tockenID":1,"branch":"main","webhookSecret":"replace-with-a-secret-containing-at-least-32-characters"}'
 ```

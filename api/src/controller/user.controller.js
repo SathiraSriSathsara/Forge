@@ -3,6 +3,10 @@ const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/ApiError");
 const bcrypt = require("bcrypt");
 
+function serializeUser(user) {
+    const { password, ...safeUser } = user.toJSON();
+    return safeUser;
+}
 
 /**
  * Create a new user
@@ -11,12 +15,14 @@ const bcrypt = require("bcrypt");
 const createUser = asyncHandler(async (req, res) => {
     const { firstName, lastName, email, username, password } = req.body;
 
-    if (!firstName || !email || !username || !password) {
+    if (!firstName || !lastName || !email || !username || !password) {
         throw new ApiError(400, "All fields are required");
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
     const existingUser = await User.findOne({
-        where: { email },
+        where: { email: normalizedEmail },
     });
 
     if (existingUser) {
@@ -30,7 +36,7 @@ const createUser = asyncHandler(async (req, res) => {
     const user = await User.create({
         firstName,
         lastName,
-        email,
+        email: normalizedEmail,
         username,
         password: hashedPassword,
     });
@@ -38,7 +44,7 @@ const createUser = asyncHandler(async (req, res) => {
     res.status(201).json({
         success: true,
         message: "User created successfully",
-        data: user,
+        data: serializeUser(user),
     });
 });
 

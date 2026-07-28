@@ -1,5 +1,6 @@
 const fs = require("fs/promises");
 const path = require("path");
+const crypto = require("crypto");
 const { Buffer } = require("buffer");
 const simpleGit = require("simple-git");
 
@@ -7,10 +8,74 @@ const { Repo, Tocken } = require("../models");
 const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/ApiError");
 const { decryptToken } = require("../utils/tokenCrypto");
+const {
+  buildDockerImage,
+} = require("../services/dockerBuild.service");
 
 // Repository storage directory:
 // API/repos
 const REPOS_ROOT = path.resolve(process.cwd(), "repos");
+const activeRepositoryUpdates = new Set();
+
+function resolveRepositoryPath(savedLocation) {
+  if (!savedLocation || typeof savedLocation !== "string") {
+    throw new ApiError(500, "Repository location is not configured");
+  }
+
+  const repositoryPath = path.resolve(savedLocation);
+
+  if (!repositoryPath.startsWith(`${REPOS_ROOT}${path.sep}`)) {
+    throw new ApiError(500, "Repository location is outside the repositories root");
+  }
+
+  return repositoryPath;
+}
+
+function validateWebhookSecret(webhookSecret) {
+  if (
+    typeof webhookSecret !== "string" ||
+    webhookSecret.length < 32 ||
+    webhookSecret.length > 255
+  ) {
+    throw new ApiError(
+      400,
+      "webhookSecret must be between 32 and 255 characters",
+    );
+  }
+
+  return webhookSecret;
+}
+
+function createDockerImageName(repositoryName) {
+  const normalizedName = repositoryName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return `forge-${normalizedName || "repository"}`;
+}
+
+function verifyGiteaSignature(rawBody, signature, secret) {
+  if (
+    !Buffer.isBuffer(rawBody) ||
+    typeof signature !== "string" ||
+    typeof secret !== "string" ||
+    !/^[a-f0-9]{64}$/.test(signature)
+  ) {
+    return false;
+  }
+
+  const expectedDigest = crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest();
+  const suppliedDigest = Buffer.from(signature, "hex");
+
+  return (
+    expectedDigest.length === suppliedDigest.length &&
+    crypto.timingSafeEqual(expectedDigest, suppliedDigest)
+  );
+}
 
 /**
  * Convert a value into a safe folder name.
@@ -146,14 +211,26 @@ async function cloneRepository({
     cloneOptions.push("--single-branch");
   }
 
-  await git.clone(repoUrl, repositoryPath, cloneOptions);
-
-  const clonedGit = simpleGit(repositoryPath);
+  try {
+    await git.clone(repoUrl, repositoryPath, cloneOptions);
+  } finally {
+    /*
+     * Git persists clone --config values in the new repository. Remove the
+     * authorization header even when a clone leaves a partial repository.
+     */
+    try {
+      const clonedGit = simpleGit(repositoryPath);
+      await clonedGit.raw(["config", "--unset-all", "http.extraHeader"]);
+    } catch {
+      // The clone may have failed before a Git repository was created.
+    }
+  }
 
   if (requestedBranch) {
     return requestedBranch;
   }
 
+  const clonedGit = simpleGit(repositoryPath);
   return getDefaultBranch(clonedGit);
 }
 
@@ -227,15 +304,16 @@ async function updateRepository({
  * POST /api/repos/clone
  */
 exports.cloneRepo = asyncHandler(async (req, res) => {
-  const { name, url, tockenID, branch } = req.body;
+  const { name, url, tockenID, branch, webhookSecret } = req.body;
 
-  if (!name || !url || !tockenID) {
+  if (!name || !url || !tockenID || webhookSecret === undefined) {
     throw new ApiError(
       400,
-      "name, url and tockenID fields are required",
+      "name, url, tockenID and webhookSecret fields are required",
     );
   }
 
+  const validatedWebhookSecret = validateWebhookSecret(webhookSecret);
   const tocken = await Tocken.findByPk(tockenID);
 
   if (!tocken) {
@@ -258,6 +336,7 @@ exports.cloneRepo = asyncHandler(async (req, res) => {
 
   const repoName = sanitizeRepositoryName(name);
   const repositoryPath = path.join(REPOS_ROOT, repoName);
+  const imageName = createDockerImageName(repoName);
 
   /*
    * This additional check prevents path traversal.
@@ -397,6 +476,9 @@ exports.cloneRepo = asyncHandler(async (req, res) => {
       repo_url: repoUrl,
       saved_location: repositoryPath,
       branch: selectedBranch,
+      tocken_id: tocken.id,
+      webhook_secret: validatedWebhookSecret,
+      image_name: imageName,
       last_commit: lastCommit,
       last_updated: new Date(),
     },
@@ -407,6 +489,9 @@ exports.cloneRepo = asyncHandler(async (req, res) => {
       repo_name: repoName,
       saved_location: repositoryPath,
       branch: selectedBranch,
+      tocken_id: tocken.id,
+      webhook_secret: validatedWebhookSecret,
+      image_name: imageName,
       last_commit: lastCommit,
       last_updated: new Date(),
     });
@@ -417,6 +502,11 @@ exports.cloneRepo = asyncHandler(async (req, res) => {
    * JavaScript strings cannot be securely zeroed, but this reduces its scope.
    */
   decryptedTocken = null;
+
+  const dockerBuild = await buildDockerImage({
+    dockerfilePath: repositoryPath,
+    imageName: repoRecord.image_name,
+  });
 
   return res.status(created ? 201 : 200).json({
     success: true,
@@ -433,6 +523,203 @@ exports.cloneRepo = asyncHandler(async (req, res) => {
       lastCommit: repoRecord.last_commit,
       lastUpdated: repoRecord.last_updated,
       action,
+      webhookEndpoint: `/api/webhooks/gitea/${repoRecord.id}`,
+      imageName: repoRecord.image_name,
+      dockerBuild,
     },
   });
-}); 
+});
+
+/**
+ * POST /api/webhooks/gitea/:repoId
+ */
+exports.handleGiteaWebhook = asyncHandler(async (req, res) => {
+  const { repoId } = req.params;
+
+  if (!/^[1-9]\d*$/.test(repoId)) {
+    throw new ApiError(400, "Invalid repository ID");
+  }
+
+  const repo = await Repo.findByPk(repoId, {
+    include: [{
+      model: Tocken,
+      as: "tocken",
+      required: false,
+    }],
+  });
+
+  if (!repo) {
+    throw new ApiError(404, "Repository not found");
+  }
+
+  if (!repo.tocken) {
+    throw new ApiError(404, "Tocken not found");
+  }
+
+  if (String(repo.tocken.platform).trim().toLowerCase() !== "gitea") {
+    throw new ApiError(400, "Repository is not configured with a Gitea tocken");
+  }
+
+  const event = req.get("x-gitea-event");
+  const signature = req.get("x-gitea-signature");
+
+  if (
+    !verifyGiteaSignature(
+      req.rawBody,
+      signature,
+      repo.webhook_secret,
+    )
+  ) {
+    throw new ApiError(401, "Invalid webhook signature");
+  }
+
+  if (event !== "push") {
+    return res.status(200).json({
+      success: true,
+      message: "Webhook event ignored",
+    });
+  }
+
+  const { ref, after } = req.body || {};
+
+  if (typeof ref !== "string" || !ref.trim()) {
+    throw new ApiError(400, "Invalid webhook ref");
+  }
+
+  if (!ref.startsWith("refs/")) {
+    throw new ApiError(400, "Invalid webhook ref");
+  }
+
+  if (!ref.startsWith("refs/heads/")) {
+    return res.status(200).json({
+      success: true,
+      message: "Non-branch ref ignored",
+    });
+  }
+
+  const pushedBranch = ref.slice("refs/heads/".length);
+
+  if (!pushedBranch) {
+    throw new ApiError(400, "Invalid webhook ref");
+  }
+
+  if (pushedBranch !== repo.branch) {
+    return res.status(200).json({
+      success: true,
+      message: "Push to another branch ignored",
+    });
+  }
+
+  if (typeof after !== "string" || !/^[a-fA-F0-9]+$/.test(after)) {
+    throw new ApiError(400, "Invalid webhook payload");
+  }
+
+  if (/^0+$/.test(after)) {
+    return res.status(200).json({
+      success: true,
+      message: "Branch deletion ignored",
+    });
+  }
+
+  const updateKey = String(repo.id);
+
+  if (activeRepositoryUpdates.has(updateKey)) {
+    return res.status(202).json({
+      success: true,
+      message: "Repository update already in progress",
+    });
+  }
+
+  activeRepositoryUpdates.add(updateKey);
+
+  let decryptedTocken;
+
+  try {
+    try {
+      decryptedTocken = decryptToken(repo.tocken.tocken);
+    } catch {
+      throw new ApiError(500, "Could not decrypt the stored Git token");
+    }
+
+    const repositoryPath = resolveRepositoryPath(repo.saved_location);
+    const authHeader = createAuthenticationHeader(
+      repo.tocken.username,
+      decryptedTocken,
+    );
+    const localDirectoryExists = await directoryExists(repositoryPath);
+    let action;
+
+    if (
+      localDirectoryExists &&
+      await isGitRepository(repositoryPath)
+    ) {
+      await updateRepository({
+        repositoryPath,
+        authHeader,
+        requestedBranch: repo.branch,
+      });
+      action = "updated";
+    } else {
+      if (localDirectoryExists) {
+        await fs.rm(repositoryPath, {
+          recursive: true,
+          force: true,
+        });
+      }
+
+      await fs.mkdir(REPOS_ROOT, {
+        recursive: true,
+      });
+
+      await cloneRepository({
+        repoUrl: repo.repo_url,
+        repositoryPath,
+        authHeader,
+        requestedBranch: repo.branch,
+      });
+      action = "cloned";
+    }
+
+    const repositoryGit = simpleGit(repositoryPath);
+    const lastCommit = (
+      await repositoryGit.revparse(["HEAD"])
+    ).trim();
+    const lastUpdated = new Date();
+
+    await repo.update({
+      last_commit: lastCommit,
+      last_updated: lastUpdated,
+    });
+
+    const dockerBuild = await buildDockerImage({
+      dockerfilePath: repositoryPath,
+      imageName: repo.image_name,
+    });
+
+    console.log("Hey");
+    console.log({
+      repository: repo.repo_name,
+      branch: repo.branch,
+      action,
+      commit: lastCommit,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Repository synchronized successfully",
+      data: {
+        id: repo.id,
+        name: repo.repo_name,
+        branch: repo.branch,
+        action,
+        lastCommit: repo.last_commit,
+        lastUpdated: repo.last_updated,
+        imageName: repo.image_name,
+        dockerBuild,
+      },
+    });
+  } finally {
+    decryptedTocken = null;
+    activeRepositoryUpdates.delete(updateKey);
+  }
+});

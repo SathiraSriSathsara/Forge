@@ -48,6 +48,11 @@ const Repo = sequelize.define(
       allowNull: false,
     },
 
+    image_name: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+    },
+
     last_commit: {
       type: DataTypes.STRING(100),
       allowNull: true,
