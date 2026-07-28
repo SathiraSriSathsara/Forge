@@ -45,7 +45,7 @@ sudo journalctl -u forge-builder -f
 Test the API:
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8010/health
 ```
 
 One important point: because the service runs as `forge-builder`, repositories cloned later into `/home/Forge/repos` must remain readable by that user. Your main API should either clone repositories using the same user or assign correct ownership after cloning:

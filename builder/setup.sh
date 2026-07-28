@@ -33,7 +33,7 @@ SERVICE_USER="forge-builder"
 SERVICE_GROUP="forge-builder"
 
 HOST="127.0.0.1"
-PORT="8000"
+PORT="8010"
 
 SERVICE_WAS_CREATED=false
 

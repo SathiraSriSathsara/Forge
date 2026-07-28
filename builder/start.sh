@@ -21,9 +21,9 @@ sleep 2
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
     echo "${APP_NAME} started successfully."
     echo
-    echo "API:    http://127.0.0.1:8000"
-    echo "Health: http://127.0.0.1:8000/health"
-    echo "Docs:   http://127.0.0.1:8000/docs"
+    echo "API:    http://127.0.0.1:8010"
+    echo "Health: http://127.0.0.1:8010/health"
+    echo "Docs:   http://127.0.0.1:8010/docs"
 else
     echo "${APP_NAME} failed to start."
     echo
