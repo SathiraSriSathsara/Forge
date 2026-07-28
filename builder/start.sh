@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
@@ -37,4 +36,4 @@ else
 
     exit 1
 fi
-```
+

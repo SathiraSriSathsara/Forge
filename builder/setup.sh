@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
@@ -171,4 +170,4 @@ else
 
     fail "Forge Builder API failed to start"
 fi
-```
+

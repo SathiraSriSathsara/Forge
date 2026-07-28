@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
@@ -28,4 +27,4 @@ if systemctl is-active --quiet "${SERVICE_NAME}"; then
 fi
 
 echo "${APP_NAME} stopped successfully."
-```
+
