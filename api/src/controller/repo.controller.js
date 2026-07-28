@@ -531,6 +531,61 @@ exports.cloneRepo = asyncHandler(async (req, res) => {
 });
 
 /**
+ * GET /api/repos
+ */
+exports.getRepos = asyncHandler(async (req, res) => {
+  const repos = await Repo.findAll({
+    attributes: [
+      "id",
+      "repo_name",
+      "repo_url",
+      "saved_location",
+      "branch",
+      "image_name",
+      "last_commit",
+      "last_updated",
+      "createdAt",
+      "updatedAt",
+    ],
+    include: [{
+      model: Tocken,
+      as: "tocken",
+      attributes: ["id", "name", "platform", "username"],
+      required: false,
+    }],
+    order: [["last_updated", "DESC"]],
+  });
+
+  const data = repos.map((repo) => ({
+    id: repo.id,
+    name: repo.repo_name,
+    url: repo.repo_url,
+    savedLocation: repo.saved_location,
+    branch: repo.branch,
+    imageName: repo.image_name,
+    lastCommit: repo.last_commit,
+    lastUpdated: repo.last_updated,
+    createdAt: repo.createdAt,
+    updatedAt: repo.updatedAt,
+    webhookEndpoint: `/api/webhooks/gitea/${repo.id}`,
+    credential: repo.tocken
+      ? {
+          id: repo.tocken.id,
+          name: repo.tocken.name,
+          platform: repo.tocken.platform,
+          username: repo.tocken.username,
+        }
+      : null,
+  }));
+
+  return res.status(200).json({
+    success: true,
+    count: data.length,
+    data,
+  });
+});
+
+/**
  * POST /api/webhooks/gitea/:repoId
  */
 exports.handleGiteaWebhook = asyncHandler(async (req, res) => {

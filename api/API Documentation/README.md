@@ -155,6 +155,7 @@ configured HMAC signature.
 | `GET` | `/api/tockens` | List credential metadata (protected). | `200` |
 | `DELETE` | `/api/tockens/:id` | Delete a credential (protected). | `200` |
 | `POST` | `/api/repos/clone` | Clone or synchronize a repository (protected). | `200` or `201` |
+| `GET` | `/api/repos` | List synchronized repositories (protected). | `200` |
 | `POST` | `/api/webhooks/gitea/:repoId` | Process a signed Gitea push webhook. | `200` or `202` |
 
 ## Authentication
@@ -361,22 +362,19 @@ Returns `404 User not found` when no matching record exists.
 
 `PUT /api/users/:id`
 
-The current controller accepts `name`, `email`, and `age`:
+The endpoint updates the user's profile fields:
 
 ```json
 {
-  "name": "Ada Byron",
-  "email": "ada.byron@example.com",
-  "age": 30
+  "firstName": "Ada",
+  "lastName": "Byron",
+  "username": "ada",
+  "email": "ada.byron@example.com"
 }
 ```
 
-> [!CAUTION]
-> The User model contains `firstName`, `lastName`, and `username`, but does not
-> contain `name` or `age`. Sequelize ignores those unknown fields, so only
-> `email` is effectively updateable through this endpoint. Password updates
-> are not supported. This mismatch should be fixed before clients rely on a
-> full user update.
+All four fields are required. Names and username are trimmed, and email is
+trimmed and normalized to lowercase. Password updates are not supported.
 
 **Response — `200 OK`**
 
@@ -509,6 +507,42 @@ plaintext token values are both excluded.
 Returns `404 Tocken not found` when no matching credential exists.
 
 ## Repositories
+
+### List repositories
+
+`GET /api/repos`
+
+Returns synchronized repositories ordered by `lastUpdated` descending. The
+associated credential contains metadata only; tokens and webhook secrets are
+never returned.
+
+**Response — `200 OK`**
+
+```json
+{
+  "success": true,
+  "count": 1,
+  "data": [
+    {
+      "id": 1,
+      "name": "example-project",
+      "url": "https://github.com/example/example-project.git",
+      "savedLocation": "C:\\path\\to\\api\\repos\\example-project",
+      "branch": "main",
+      "imageName": "forge-example-project",
+      "lastCommit": "a1b2c3d4e5f6...",
+      "lastUpdated": "2026-07-29T10:00:00.000Z",
+      "webhookEndpoint": "/api/webhooks/gitea/1",
+      "credential": {
+        "id": 1,
+        "name": "GitHub automation",
+        "platform": "github",
+        "username": "octocat"
+      }
+    }
+  ]
+}
+```
 
 ### Clone or synchronize a repository
 

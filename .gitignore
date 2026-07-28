@@ -1,4 +1,6 @@
 __pycache__
 api/node_modules/
+frontend/node_modules/
 api/package-lock.json
 .env
+.env.local

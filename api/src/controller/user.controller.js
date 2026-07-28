@@ -89,7 +89,23 @@ const getUserById = asyncHandler(async (req, res) => {
  */
 const updateUser = asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { name, email, age } = req.body;
+    const { firstName, lastName, username, email } = req.body;
+
+    if (
+        typeof firstName !== "string" ||
+        !firstName.trim() ||
+        typeof lastName !== "string" ||
+        !lastName.trim() ||
+        typeof username !== "string" ||
+        !username.trim() ||
+        typeof email !== "string" ||
+        !email.trim()
+    ) {
+        throw new ApiError(
+            400,
+            "firstName, lastName, username and email are required",
+        );
+    }
 
     const user = await User.findByPk(id);
 
@@ -98,15 +114,16 @@ const updateUser = asyncHandler(async (req, res) => {
     }
 
     await user.update({
-        name: name ?? user.name,
-        email: email ?? user.email,
-        age: age ?? user.age,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        username: username.trim(),
+        email: email.trim().toLowerCase(),
     });
 
     res.status(200).json({
         success: true,
         message: "User updated successfully",
-        data: user,
+        data: serializeUser(user),
     });
 });
 

@@ -1,0 +1,17 @@
+{
+  "name": "forge-simplified-frontend",
+  "private": true,
+  "scripts": {
+    "build": "tailwindcss -i ./src/input.css -o ./public/assets/app.css --minify",
+    "watch": "tailwindcss -i ./src/input.css -o ./public/assets/app.css --watch",
+    "copy:vendor": "node scripts/copy-vendor.js",
+    "postinstall": "npm run copy:vendor"
+  },
+  "dependencies": {
+    "sweetalert2": "11.26.25"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.1.11",
+    "tailwindcss": "4.1.11"
+  }
+}
