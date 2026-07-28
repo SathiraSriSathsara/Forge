@@ -1,9 +1,9 @@
 require("dotenv").config();
 
 const app = require("./app");
-const sequelize = require("./src/config/db.config");
+const { sequelize } = require("./src/models");
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 async function startServer() {
     try {
@@ -15,10 +15,11 @@ async function startServer() {
 
         app.listen(PORT, () => {
             console.log(`Server running on http://localhost:${PORT}`);
+            console.log(`API available at http://localhost:${PORT}/api`);
         });
     } catch (error) {
         console.error("Unable to start the server:");
-        console.error(error.message);
+        console.error(error);
 
         process.exit(1);
     }
