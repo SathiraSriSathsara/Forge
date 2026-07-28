@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
@@ -471,4 +470,4 @@ echo
 echo "Restart service manually after code changes:"
 echo "  sudo systemctl restart ${SERVICE_NAME}"
 echo
-```
+
