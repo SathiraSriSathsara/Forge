@@ -53,3 +53,11 @@ One important point: because the service runs as `forge-builder`, repositories c
 ```bash
 sudo chown -R forge-builder:forge-builder /home/Forge/repos/example-repo
 ```
+
+## Check All Endpoints
+
+Run
+
+```
+curl http://127.0.0.1:8010/openapi.json | jq .
+```
